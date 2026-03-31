@@ -75,7 +75,7 @@ def run_evaluation(input_path: str, output_path: str,
         for cls_idx, cls_name in enumerate(class_names):
             mask        = test_targets.cpu() == cls_idx
             cls_correct = pred.cpu()[mask].eq(test_targets.cpu()[mask]).sum().item()
-            cls_total   = mask.sum().item()
+            cls_total   = torch.sum(mask).item()
             if cls_total > 0:
                 cls_acc = 100. * cls_correct / cls_total
                 bar     = "█" * int(cls_acc / 10) + "░" * (10 - int(cls_acc / 10))
