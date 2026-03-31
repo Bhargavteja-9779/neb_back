@@ -5,4 +5,10 @@ __pycache__/
 .DS_Store
 workspace/
 node_agent/data/
+node_modules/
+dist/
+.env
+.parcel-cache/
+.next/
+build/
 

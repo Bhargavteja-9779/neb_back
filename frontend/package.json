@@ -1,0 +1,30 @@
+{
+  "name": "nebula-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "axios": "^1.7.9",
+    "framer-motion": "^11.15.0",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-globe.gl": "^2.37.0",
+    "react-router-dom": "^7.1.1",
+    "react-simple-maps": "^3.0.0",
+    "recharts": "^2.15.0",
+    "socket.io-client": "^4.8.1",
+    "tailwindcss": "^4.0.0",
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.5"
+  }
+}
