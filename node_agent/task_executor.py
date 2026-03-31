@@ -59,14 +59,17 @@ def execute_task(task_id: str, job_id: str, task_type: str,
 
     # ── Route to capability module ─────────────────────────────────────────────
     if task_type == "preprocessing":
+        print(f"[NODE {node_id}] Executing preprocessing...")
         run_preprocessing(output_path, job_type=job_type)
 
     elif task_type == "training":
+        print(f"[NODE {node_id}] Training model...")
         run_training(input_path, output_path,
                      node_id=node_id, job_id=job_id, task_id=task_id,
                      job_type=job_type)
 
     elif task_type == "evaluation":
+        print(f"[NODE {node_id}] Running evaluation...")
         run_evaluation(input_path, output_path,
                        node_id=node_id, job_id=job_id, task_id=task_id,
                        job_type=job_type)

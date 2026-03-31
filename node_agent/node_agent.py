@@ -20,7 +20,17 @@ import platform
 import itertools
 import threading
 import psutil
+import concurrent.futures
 from requests.exceptions import RequestException
+import torch
+import os
+
+# Limit PyTorch to leave at least 1 core for the OS and our background heartbeat thread!
+# Otherwise, 100% CPU starvation causes the network OS layer to time out.
+physical_cores = psutil.cpu_count(logical=False)
+if physical_cores and physical_cores > 1:
+    torch.set_num_threads(physical_cores - 1)
+
 
 from config import SERVER_URL
 from task_executor import execute_task
@@ -34,6 +44,9 @@ CYAN   = "\033[96m"
 GREEN  = "\033[92m"
 YELLOW = "\033[93m"
 RESET  = "\033[0m"
+
+active_tasks_count = 0
+active_tasks_lock = threading.Lock()
 
 
 def detect_capabilities():
@@ -103,20 +116,36 @@ def register_node():
         time.sleep(5)
 
 
+def get_system_stats():
+    cpu_usage = psutil.cpu_percent(interval=1)
+    ram_usage = psutil.virtual_memory().percent
+    with active_tasks_lock:
+        current_active = active_tasks_count
+    return cpu_usage, ram_usage, current_active
+
+
 def heartbeat_loop():
     """Sends heartbeats every 5 seconds so the Orchestrator knows this node is alive."""
     while True:
         try:
-            requests.post(f"{SERVER_URL}/heartbeat", json={"node_id": NODE_ID}, timeout=3)
-        except RequestException:
-            pass
+            cpu, ram, tasks = get_system_stats()
+            requests.post(f"{SERVER_URL}/heartbeat", json={
+                "node_id": NODE_ID,
+                "cpu_usage": cpu,
+                "ram_usage": ram,
+                "active_tasks": tasks
+            }, timeout=10)
+        except RequestException as e:
+            print(f"\n[NODE ] Heartbeat failed to reach server: {e}")
+        except Exception as e:
+            print(f"\n[NODE ] Heartbeat internal error: {e}")
         time.sleep(5)
 
 
 def check_for_task():
     """Polls the Orchestrator for the next assigned task."""
     try:
-        resp = requests.get(f"{SERVER_URL}/get_task/{NODE_ID}", timeout=5)
+        resp = requests.get(f"{SERVER_URL}/get_task/{NODE_ID}", timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             if "task_id" in data:
@@ -124,6 +153,33 @@ def check_for_task():
     except RequestException:
         pass
     return None
+
+
+def process_task(task):
+    global active_tasks_count
+    with active_tasks_lock:
+        active_tasks_count += 1
+        
+    print(f"\n{BOLD}{GREEN}[NODE ] Task received!{RESET}")
+    print(f"  Task ID   : {task['task_id']}")
+    print(f"  Stage     : {BOLD}{task['task_type'].upper()}{RESET}")
+    print(f"  Dataset   : {task.get('job_type', 'mnist').upper()}")
+    print(f"  Job       : {task['job_id']}\n")
+
+    try:
+        execute_task(
+            task_id   = task['task_id'],
+            job_id    = task['job_id'],
+            task_type = task['task_type'],
+            dependency= task.get('dependency'),
+            node_id   = NODE_ID,
+            job_type  = task.get('job_type', 'mnist'),
+        )
+    except Exception as e:
+        print(f"\n[NODE ] Task failed: {e}\n")
+    finally:
+        with active_tasks_lock:
+            active_tasks_count -= 1
 
 
 def main():
@@ -136,38 +192,27 @@ def main():
     print(f"[NODE ] Polling Orchestrator for pipeline tasks...")
     spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
 
+    # Support up to 3 concurrent tasks to fulfill multi-task requirement
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+
     try:
         while True:
-            sys.stdout.write(f"\r{CYAN}{next(spinner)} [{NODE_ID}] Waiting for task assignment...{RESET}")
+            # We only print the spinner if we aren't overloaded just to keep the terminal looking alive
+            # But the terminal may interleave outputs due to multithreading.
+            sys.stdout.write(f"\r{CYAN}{next(spinner)} [{NODE_ID}] Waiting for task assignment (Active: {active_tasks_count})...{RESET}")
             sys.stdout.flush()
 
             task = check_for_task()
             if task:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
-
-                print(f"\n{BOLD}{GREEN}[NODE ] Task received!{RESET}")
-                print(f"  Task ID   : {task['task_id']}")
-                print(f"  Stage     : {BOLD}{task['task_type'].upper()}{RESET}")
-                print(f"  Dataset   : {task.get('job_type', 'mnist').upper()}")
-                print(f"  Job       : {task['job_id']}\n")
-
-                try:
-                    execute_task(
-                        task_id   = task['task_id'],
-                        job_id    = task['job_id'],
-                        task_type = task['task_type'],
-                        dependency= task.get('dependency'),
-                        node_id   = NODE_ID,
-                        job_type  = task.get('job_type', 'mnist'),
-                    )
-                except Exception as e:
-                    print(f"\n[NODE ] Task failed: {e}\n")
-
-            time.sleep(1)
+                executor.submit(process_task, task)
+            else:
+                time.sleep(1)
 
     except KeyboardInterrupt:
         print(f"\n\n{YELLOW}[NODE ] Shutting down gracefully. Goodbye.{RESET}\n")
+        executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

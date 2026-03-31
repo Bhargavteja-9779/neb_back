@@ -5,7 +5,8 @@ from config import DATABASE_URL
 def get_db_connection() -> Connection:
     """Returns a connection to the SQLite database."""
     db_path = DATABASE_URL.replace("sqlite:///", "")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -33,7 +34,10 @@ def init_db():
             trust INTEGER DEFAULT 50,
             status TEXT DEFAULT 'online',
             credits INTEGER DEFAULT 0,
-            last_seen REAL
+            last_seen REAL,
+            cpu_usage REAL DEFAULT 0.0,
+            ram_usage REAL DEFAULT 0.0,
+            active_tasks INTEGER DEFAULT 0
         )
     ''')
     
@@ -44,6 +48,7 @@ def init_db():
             type TEXT,
             job_type TEXT DEFAULT 'mnist',
             status TEXT DEFAULT 'pending',
+            pipeline_state TEXT DEFAULT 'PENDING',
             accuracy REAL DEFAULT 0.0,
             loss REAL DEFAULT 0.0
         )

@@ -12,11 +12,8 @@ from database import init_db, get_db_connection
 from models import NodeRegistration, NodeHeartbeat, JobSubmission, JobMetrics
 from trust_manager import add_trust, deduct_trust, add_credits
 from websocket_manager import manager
-from scheduler import get_best_pipeline_node
-from job_manager import (
-    check_node_failures, simulate_node_failure, reassign_job,
-    create_pipeline_job, complete_task
-)
+from node_registry import NodeRegistry
+from pipeline_manager import PipelineManager
 
 app = FastAPI(
     title="NebulaAI Pipeline Orchestrator",
@@ -39,7 +36,9 @@ async def startup_event():
 
     async def failure_detector():
         while True:
-            check_node_failures()
+            failed = NodeRegistry.check_node_failures()
+            for n in failed:
+                PipelineManager.handle_failed_node_tasks(n)
             await asyncio.sleep(5)
     asyncio.create_task(failure_detector())
 
@@ -48,21 +47,7 @@ async def startup_event():
 
 @app.post("/register_node", tags=["Nodes"])
 def register_node(node: NodeRegistration):
-    caps_json = json.dumps(node.capabilities)
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT id FROM nodes WHERE id = ?", (node.id,))
-    if c.fetchone():
-        c.execute("""
-            UPDATE nodes SET cpu=?, ram=?, gpu=?, capabilities=?, status='online', last_seen=? WHERE id=?
-        """, (node.cpu, node.ram, node.gpu, caps_json, time.time(), node.id))
-    else:
-        c.execute("""
-            INSERT INTO nodes (id, cpu, ram, gpu, capabilities, trust, status, credits, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (node.id, node.cpu, node.ram, node.gpu, caps_json, 50, 'online', 0, time.time()))
-    conn.commit()
-    conn.close()
+    NodeRegistry.register_node(node.id, node.cpu, node.ram, node.gpu, node.hostname, node.capabilities)
     gpu_label = "GPU" if node.gpu else "CPU"
     print(f"  [NODE ] Joined: {node.id} | {gpu_label} | Caps: {node.capabilities}")
     return {"status": "success", "message": f"Node {node.id} registered"}
@@ -70,28 +55,13 @@ def register_node(node: NodeRegistration):
 
 @app.post("/heartbeat", tags=["Nodes"])
 def heartbeat(hb: NodeHeartbeat):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE nodes SET last_seen=?, status='online' WHERE id=?", (time.time(), hb.node_id))
-    conn.commit()
-    conn.close()
+    NodeRegistry.update_heartbeat(hb.node_id, hb.cpu_usage, hb.ram_usage, hb.active_tasks)
     return {"status": "ok"}
 
 
 @app.get("/get_nodes", tags=["Nodes"])
 def get_nodes():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM nodes")
-    nodes = [dict(row) for row in c.fetchall()]
-    conn.close()
-    for n in nodes:
-        if n['capabilities']:
-            try:
-                n['capabilities'] = json.loads(n['capabilities'])
-            except:
-                n['capabilities'] = []
-    return nodes
+    return NodeRegistry.get_all_nodes()
 
 
 # ─────────────────── Live Status Dashboard ──────────────
@@ -105,7 +75,7 @@ def cluster_status():
     conn = get_db_connection()
     c = conn.cursor()
 
-    c.execute("SELECT id, cpu, ram, gpu, trust, credits, status, capabilities FROM nodes")
+    c.execute("SELECT id, cpu, ram, gpu, trust, credits, status, capabilities, active_tasks, cpu_usage FROM nodes")
     raw_nodes = c.fetchall()
 
     nodes_out = []
@@ -120,10 +90,12 @@ def cluster_status():
             "credits": n['credits'],
             "status": n['status'],
             "capabilities": caps,
+            "active_tasks": n['active_tasks'],
+            "cpu_usage": n['cpu_usage'],
         })
 
     c.execute("""
-        SELECT t.id, t.job_id, t.task_type, t.status, t.assigned_node, j.job_type
+        SELECT t.id, t.job_id, t.task_type, t.status, t.assigned_node, j.job_type, j.pipeline_state
         FROM job_tasks t
         LEFT JOIN jobs j ON t.job_id = j.id
         ORDER BY t.queued_at DESC
@@ -131,7 +103,7 @@ def cluster_status():
     """)
     tasks_out = [dict(row) for row in c.fetchall()]
 
-    c.execute("SELECT id, job_type, status, accuracy, loss FROM jobs ORDER BY rowid DESC LIMIT 10")
+    c.execute("SELECT id, job_type, status, pipeline_state, accuracy, loss FROM jobs ORDER BY rowid DESC LIMIT 10")
     jobs_out = [dict(row) for row in c.fetchall()]
 
     conn.close()
@@ -154,7 +126,7 @@ def cluster_status():
 @app.post("/submit_job", tags=["Jobs"])
 def submit_job(job: JobSubmission):
     job_type = getattr(job, 'job_type', 'mnist')
-    create_pipeline_job(job.id, job_type)
+    PipelineManager.create_pipeline_job(job.id, job_type)
     return {"status": "pipeline_created", "job_id": job.id, "dataset": job_type}
 
 
@@ -162,7 +134,7 @@ def submit_job(job: JobSubmission):
 def demo_mnist():
     """Demo button #1 — Launch MNIST Handwritten Digits pipeline."""
     job_id = f"mnist_{uuid.uuid4().hex[:6]}"
-    create_pipeline_job(job_id, "mnist")
+    PipelineManager.create_pipeline_job(job_id, "mnist")
     return {"status": "launched", "job_id": job_id, "dataset": "MNIST Handwritten Digits"}
 
 
@@ -170,7 +142,7 @@ def demo_mnist():
 def demo_fashion():
     """Demo button #2 — Launch FashionMNIST Clothing Classification pipeline."""
     job_id = f"fashion_{uuid.uuid4().hex[:6]}"
-    create_pipeline_job(job_id, "fashion")
+    PipelineManager.create_pipeline_job(job_id, "fashion")
     return {"status": "launched", "job_id": job_id, "dataset": "FashionMNIST Clothing"}
 
 
@@ -178,7 +150,7 @@ def demo_fashion():
 def demo_cifar():
     """Demo button #3 — Launch CIFAR-10 Object Recognition pipeline."""
     job_id = f"cifar_{uuid.uuid4().hex[:6]}"
-    create_pipeline_job(job_id, "cifar10")
+    PipelineManager.create_pipeline_job(job_id, "cifar10")
     return {"status": "launched", "job_id": job_id, "dataset": "CIFAR-10 Objects"}
 
 
@@ -192,7 +164,7 @@ def demo_all():
     jobs = []
     for job_type in ["mnist", "fashion", "cifar10"]:
         job_id = f"{job_type}_{uuid.uuid4().hex[:6]}"
-        create_pipeline_job(job_id, job_type)
+        PipelineManager.create_pipeline_job(job_id, job_type)
         jobs.append({"job_id": job_id, "dataset": job_type})
 
     return {
@@ -217,12 +189,15 @@ def get_task(node_id: str):
         SELECT t.*, j.job_type
         FROM job_tasks t
         LEFT JOIN jobs j ON t.job_id = j.id
-        WHERE t.assigned_node = ? AND t.status = 'pending'
+        WHERE t.assigned_node = ? AND t.status = 'assigned'
+        ORDER BY t.queued_at ASC
         LIMIT 1
     """, (node_id,))
     task = c.fetchone()
     if task:
         c.execute("UPDATE job_tasks SET status='running' WHERE id=?", (task['id'],))
+        # Increase active tasks for this node
+        c.execute("UPDATE nodes SET active_tasks = active_tasks + 1 WHERE id=?", (node_id,))
         conn.commit()
         conn.close()
         print(f"  [EXEC ] Node {node_id} accepted [{task['task_type']}] task {task['id']} (dataset: {task['job_type']})")
@@ -244,7 +219,7 @@ async def upload_task_output(task_id: str, file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
-    complete_task(task_id, file_path)
+    PipelineManager.complete_task(task_id, file_path)
     return {"status": "success", "message": f"Artifact saved for task {task_id}"}
 
 
@@ -283,7 +258,8 @@ async def task_metrics(metrics: JobMetrics):
 @app.post("/simulate_failure/{node_id}", tags=["Demo"])
 def fail_node(node_id: str):
     """Manually simulate a node failure — then watch the pipeline reroute."""
-    simulate_node_failure(node_id)
+    NodeRegistry.simulate_failure(node_id)
+    PipelineManager.handle_failed_node_tasks(node_id)
     return {"status": "success", "message": f"Simulated failure for {node_id}. Tasks will be rerouted."}
 
 

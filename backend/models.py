@@ -11,6 +11,9 @@ class NodeRegistration(BaseModel):
 
 class NodeHeartbeat(BaseModel):
     node_id: str
+    cpu_usage: float
+    ram_usage: float
+    active_tasks: int
 
 class JobSubmission(BaseModel):
     id: str
